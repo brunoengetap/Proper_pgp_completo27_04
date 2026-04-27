@@ -544,6 +544,7 @@ function normalizeVisitTipo(tipoRaw) {
 }
 
 function withDuplicateCompat(payload) {
+  // Bloco mantido para compatibilidade durante resolução de conflitos de merge.
   const data = payload || {};
   if (!Array.isArray(data.findings)) return data;
 
