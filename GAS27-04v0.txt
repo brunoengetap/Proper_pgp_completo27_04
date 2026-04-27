@@ -894,19 +894,23 @@ function getDuplicates() {
       .filter(f => f.categoria === category)
       .map(f => ({ key: f.key, count: f.count }));
 
-  return {
+  const response = {
     status: 'ok',
     ts: new Date().toISOString(),
-    api_compat: ['findings_v2', 'duplicatas_v1'],
     findings,
     resumo,
-    duplicatas: {
-      por_machine_id: legacyList('maquina.id'),
-      por_cliente_serie: legacyList('maquina.cliente_serie'),
-      por_cliente_tag: legacyList('maquina.cliente_tag')
-    },
     total_duplicatas: findings.length
   };
+
+  // Compatibilidade retroativa para consumidores legados (admin antigo)
+  response.api_compat = ['findings_v2', 'duplicatas_v1'];
+  response.duplicatas = {
+    por_machine_id: legacyList('maquina.id'),
+    por_cliente_serie: legacyList('maquina.cliente_serie'),
+    por_cliente_tag: legacyList('maquina.cliente_tag')
+  };
+
+  return response;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
