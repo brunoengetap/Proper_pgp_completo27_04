@@ -2720,7 +2720,6 @@ document.addEventListener('change', function(e) {
 });
 
 // compatibilidade legado
-function toggleNA(pk, e) { if(e) e.stopPropagation(); }
 function togglePartObs(pk, e) {}
 
 // ══════════════════════════════════════════════════════════
@@ -3345,6 +3344,9 @@ function pgpGetPending(){
 
 function pgpBuildVisitRequest(payload){
   return {
+    request_id: payload.request_id || '',
+    schema_version: payload.schema_version || 'pgp.v1',
+    tipo: payload.tipo || 'inspecao',
     machine_id:payload.machine_id||'',
     client:payload.client,
     branch:payload.branch,
@@ -3379,8 +3381,12 @@ function pgpBuildPartsUpdateRequest(payload, machineIdOverride){
 
 function pgpQueueRequest(action, body){
   const list = pgpGetPending();
+  const requestId = body.request_id || body.visit_id || '';
+  const schemaVersion = body.schema_version || 'pgp.v1';
   const signatureBase = [
     action,
+    requestId,
+    schemaVersion,
     body.machine_id || '',
     body.serial || '',
     body.tag || '',
@@ -3389,8 +3395,9 @@ function pgpQueueRequest(action, body){
   ].join('|');
   const next = list.filter(item => item.signature !== signatureBase);
   next.push({ action, body, signature: signatureBase, ts: Date.now() });
-  savePendingQueue(next);
+  const result = savePendingQueue(next);
   pgpUpdatePendingBadge();
+  return result;
 }
 
 function pgpAddPending(type, payload){
@@ -4009,8 +4016,11 @@ function pgpBuildPreventivaPayload(){
   });
 
   const visitId='VIS-'+Date.now()+'-'+Math.random().toString(36).slice(2,6);
+  const requestId = 'REQ-PREV-' + Date.now() + '-' + Math.random().toString(36).slice(2,8);
 
   return{
+    request_id:requestId,
+    schema_version:'pgp.v1',
     visit_id:visitId,
     machine_id:base.machine_id,
     serial:base.serial,
@@ -4084,9 +4094,7 @@ async function pgpEnviarPreventiva(){
       if(btn){btn.disabled=false;btn.textContent='🔧 Registrar Preventiva';}
       return;
     }
-    list.push({action:'savePreventiva',body:payload,signature:payload.visit_id,ts:Date.now()});
-    const qResult = savePendingQueue(list);
-    pgpUpdatePendingBadge();
+    const qResult = pgpQueueRequest('savePreventiva', payload);
     if(qResult.blocked){
       showNotification('🚫 Não foi possível salvar — fila cheia. Conecte-se primeiro.');
     } else {
@@ -4118,9 +4126,7 @@ async function pgpEnviarPreventiva(){
     if(list.length >= QUEUE_LIMIT){
       showNotification('🚫 Falha no envio e fila cheia. Conecte-se para liberar espaço.');
     } else {
-      list.push({action:'savePreventiva',body:payload,signature:payload.visit_id,ts:Date.now()});
-      const qResult = savePendingQueue(list);
-      pgpUpdatePendingBadge();
+      const qResult = pgpQueueRequest('savePreventiva', payload);
       if(qResult.blocked){
         showNotification('🚫 Falha no envio e fila cheia. Conecte-se para liberar espaço.');
       } else {
@@ -4138,11 +4144,35 @@ function pgpRegisterNew(){
   const client=document.getElementById('nm_client').value.trim();
   const brand =document.getElementById('nm_brand').value.trim();
   const model =document.getElementById('nm_model').value.trim();
+  const serial=document.getElementById('nm_serial').value.trim();
+  const tag=document.getElementById('nm_tag').value.trim();
   if(!client||!brand||!model){showNotification('⚠ Informe cliente, marca e modelo');return;}
+  if(!serial && !tag){
+    showNotification('⚠ Informe ao menos Nº de série ou TAG para reduzir duplicidade');
+    return;
+  }
+  const candidateId = pgpMachineKey(client,brand,model,serial);
+  const db = (()=>{ try{ return JSON.parse(localStorage.getItem('proper_admin_v2')||'{}'); }catch(_){ return {}; } })();
+  const machines = Array.isArray(db?.machines) ? db.machines : [];
+  const norm = v => String(v||'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,'');
+  const hitStrong = machines.find(m => {
+    const byId = String(m?.id||'').trim() === candidateId;
+    const bySerial = serial && norm(m?.serial) && norm(m?.serial) === norm(serial);
+    const byTagClient = tag && norm(m?.tag) === norm(tag) && norm(m?.client) === norm(client);
+    return byId || bySerial || byTagClient;
+  });
+  if(hitStrong){
+    showNotification('🚫 Máquina possivelmente já cadastrada (ID/série/tag). Selecione a existente na busca.');
+    return;
+  }
+  const sameClientModel = machines.filter(m => norm(m?.client) === norm(client) && norm(m?.brand) === norm(brand) && norm(m?.model) === norm(model)).length;
+  if(sameClientModel > 0){
+    showNotification('⚠ Atenção: já existem máquinas semelhantes para este cliente. Revise série/TAG antes de salvar.');
+  }
   const eq={
-    id:pgpMachineKey(client,brand,model,document.getElementById('nm_serial').value.trim()),client,brand,model,
-    serial: document.getElementById('nm_serial').value.trim(),
-    tag:    document.getElementById('nm_tag').value.trim(),
+    id:candidateId,client,brand,model,
+    serial,
+    tag,
     location:document.getElementById('nm_location').value.trim(),
     year:   parseInt(document.getElementById('nm_year').value)||'',
     hpw:    parseInt(document.getElementById('nm_hpw').value)||0,
@@ -4193,7 +4223,11 @@ function pgpBuildPayload(){
     const interval=parseInt(intEl?.value)||pt.intDefault;
     parts[aid]={name:PART_NAME_MAP[pt.k]||pt.k,lastChange:Math.max(0,lastChange),interval,ref:refEl?.value.trim()||'',obs:obsEl?.value.trim()||'',na:isNA};
   });
+  const requestId = 'REQ-VIS-' + Date.now() + '-' + Math.random().toString(36).slice(2,8);
   return{
+    request_id:requestId,
+    schema_version:'pgp.v1',
+    tipo: _pgpTipoVisita || 'inspecao',
     machine_id:(()=>{
       if(_pgpLoadedMachine?.id) return _pgpLoadedMachine.id;
       // Gerar chave determinística quando não há máquina carregada do banco
@@ -4315,20 +4349,6 @@ function pgpUpdateAdminLocal(payload){
 
 
 
-
-// ── MACHINE KEY — identificador determinístico ────────────────────────────
-// Gerado a partir de cliente+marca+modelo+serie (serie opcional)
-// Garante que a mesma máquina sempre recebe o mesmo ID, em qualquer dispositivo
-function pgpMachineKey(client, brand, model, serial){
-  const norm = v => String(v||'').trim().toLowerCase()
-    .normalize('NFD').replace(/[̀-ͯ]/g,'')  // remove acentos
-    .replace(/[^a-z0-9]/g,'');                         // só alfanumérico
-  const parts = [norm(client), norm(brand), norm(model)];
-  const ser = norm(serial);
-  if(ser) parts.push(ser);
-  return 'MK-' + parts.join('-');
-}
-// ─────────────────────────────────────────────────────────────────────────
 
 // ── AUTH (definido no topo do bloco PGP) ──────────────
 
