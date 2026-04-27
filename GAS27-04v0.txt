@@ -542,7 +542,6 @@ function normalizeVisitTipo(tipoRaw) {
   if (t === 'inspecao' || t === 'preventiva' || t === 'inspecao_legado') return t;
   return 'inspecao';
 }
-
 function withDuplicateCompat(payload) {
   // Bloco mantido para compatibilidade durante resolução de conflitos de merge.
   const data = payload || {};
