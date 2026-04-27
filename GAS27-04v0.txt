@@ -536,6 +536,13 @@ function getMachinePartsById(machineId, serial, tag) {
   }
 }
 
+function normalizeVisitTipo(tipoRaw) {
+  const t = String(tipoRaw || '').trim().toLowerCase();
+  if (!t) return 'inspecao_legado';
+  if (t === 'inspecao' || t === 'preventiva' || t === 'inspecao_legado') return t;
+  return 'inspecao';
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // GET VISITS NORMALIZED
 // ═══════════════════════════════════════════════════════════════════════════
@@ -563,7 +570,7 @@ function getVisitsNormalized() {
       scenario:   obj['Cenário']      || '',
       tech:       obj['Técnico']      || '',
       visitDate:  obj['Data Visita']  || '',
-      tipo:       obj['Tipo']         || 'inspecao',
+      tipo:       normalizeVisitTipo(obj['Tipo']),
       generalObs: obj['Obs.Gerais']   || '',
       'Machine_ID':  obj['Machine_ID']  || '',
       'Série':       obj['Série']       || '',
@@ -706,7 +713,7 @@ function getVisitsByMachine(machineId) {
     .map(v => ({
       visitId:    v['ID'] || '',
       machine_id: v['Machine_ID'] || '',
-      tipo:       v['Tipo'] || 'inspecao',
+      tipo:       normalizeVisitTipo(v['Tipo']),
       visitDate:  v['Data Visita'] || '',
       hourTotal:  parseInt(v['Hor.Visita']) || 0,
       tech:       v['Técnico'] || '',
@@ -826,35 +833,68 @@ function getSystemHealth() {
 // ═══════════════════════════════════════════════════════════════════════════
 function getDuplicates() {
   const machines = getSheetData('MAQUINAS');
-  const dupsByMachineId    = {};
-  const dupsByClientSerial = {};
-  const dupsByClientTag    = {};
+  const clients = getSheetData('CLIENTES');
+  const models = getSheetData('MODELOS');
 
-  machines.forEach(m => {
-    const mid = String(m['ID'] || '').trim();
-    const clientSerial = (String(m['Cliente'] || '').trim() + '|' + String(m['Série'] || '').trim()).toLowerCase();
-    const clientTag    = (String(m['Cliente'] || '').trim() + '|' + String(m['TAG']    || '').trim()).toLowerCase();
-    if (mid) dupsByMachineId[mid] = (dupsByMachineId[mid] || 0) + 1;
-    if (clientSerial && clientSerial !== '|') dupsByClientSerial[clientSerial] = (dupsByClientSerial[clientSerial] || 0) + 1;
-    if (clientTag    && clientTag    !== '|') dupsByClientTag[clientTag]        = (dupsByClientTag[clientTag]    || 0) + 1;
+  const norm = v => normalizeEntityName(v).replace(/\s+/g, '');
+  const bucketBy = (rows, keyFn) => {
+    const b = {};
+    rows.forEach(r => {
+      const key = keyFn(r);
+      if (!key) return;
+      if (!b[key]) b[key] = [];
+      b[key].push(r);
+    });
+    return b;
+  };
+  const toFindings = (bucket, kind, confidence, evidence) =>
+    Object.entries(bucket)
+      .filter(([, arr]) => arr.length > 1)
+      .map(([key, arr]) => ({
+        categoria: kind,
+        confidence,
+        evidence,
+        key,
+        count: arr.length
+      }));
+
+  const machinesById = bucketBy(machines, m => String(m['ID'] || '').trim());
+  const machinesByClientSerial = bucketBy(machines, m => {
+    const client = norm(m['Cliente']);
+    const serial = norm(m['Série']);
+    return client && serial ? (client + '|' + serial) : '';
+  });
+  const machinesByClientTag = bucketBy(machines, m => {
+    const client = norm(m['Cliente']);
+    const tag = norm(m['TAG']);
+    return client && tag ? (client + '|' + tag) : '';
+  });
+  const clientsByCnpj = bucketBy(clients, c => String(c['CNPJ'] || '').replace(/\D/g, ''));
+  const modelsByBrandModel = bucketBy(models, m => {
+    const brand = norm(m['Marca']);
+    const model = norm(m['Modelo']);
+    return brand && model ? (brand + '|' + model) : '';
   });
 
-  const filterDups = obj =>
-    Object.entries(obj).filter(([, c]) => c > 1).map(([key, count]) => ({ key, count }));
+  const findings = [
+    ...toFindings(machinesById, 'maquina.id', 'alto', 'ID idêntico'),
+    ...toFindings(machinesByClientSerial, 'maquina.cliente_serie', 'alto', 'Cliente + Série idênticos'),
+    ...toFindings(machinesByClientTag, 'maquina.cliente_tag', 'alto', 'Cliente + TAG idênticos'),
+    ...toFindings(clientsByCnpj, 'cliente.cnpj', 'alto', 'CNPJ idêntico'),
+    ...toFindings(modelsByBrandModel, 'modelo.marca_modelo', 'medio', 'Marca + Modelo normalizados iguais')
+  ];
 
-  const porMachineId     = filterDups(dupsByMachineId);
-  const porClienteSerial = filterDups(dupsByClientSerial);
-  const porClienteTag    = filterDups(dupsByClientTag);
+  const resumo = findings.reduce((acc, f) => {
+    acc[f.categoria] = (acc[f.categoria] || 0) + 1;
+    return acc;
+  }, {});
 
   return {
     status: 'ok',
     ts: new Date().toISOString(),
-    duplicatas: {
-      por_machine_id:    porMachineId,
-      por_cliente_serie: porClienteSerial,
-      por_cliente_tag:   porClienteTag
-    },
-    total_duplicatas: porMachineId.length + porClienteSerial.length + porClienteTag.length
+    findings,
+    resumo,
+    total_duplicatas: findings.length
   };
 }
 
