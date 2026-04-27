@@ -199,7 +199,7 @@ function doGet(e) {
         result = getSystemHealth();
         break;
       case 'getDuplicates':
-        result = getDuplicates();
+        result = withDuplicateCompat(getDuplicates());
         break;
       case 'getDeletedRecords':
         result = getDeletedRecords(params.sheetName || '');
@@ -541,6 +541,26 @@ function normalizeVisitTipo(tipoRaw) {
   if (!t) return 'inspecao_legado';
   if (t === 'inspecao' || t === 'preventiva' || t === 'inspecao_legado') return t;
   return 'inspecao';
+}
+function withDuplicateCompat(payload) {
+  // Bloco mantido para compatibilidade durante resolução de conflitos de merge.
+  const data = payload || {};
+  if (!Array.isArray(data.findings)) return data;
+
+  const legacyList = category =>
+    data.findings
+      .filter(f => f.categoria === category)
+      .map(f => ({ key: f.key, count: f.count }));
+
+  return {
+    ...data,
+    api_compat: ['findings_v2', 'duplicatas_v1'],
+    duplicatas: {
+      por_machine_id: legacyList('maquina.id'),
+      por_cliente_serie: legacyList('maquina.cliente_serie'),
+      por_cliente_tag: legacyList('maquina.cliente_tag')
+    }
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
