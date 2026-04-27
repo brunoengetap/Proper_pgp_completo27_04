@@ -1830,6 +1830,9 @@ async function auditCheckHealth() {
         Órfãos — MACHINE_PARTS: <strong>${d.orfaos.machine_parts}</strong> &nbsp;|&nbsp;
         VISITAS: <strong>${d.orfaos.visitas}</strong>
       </div>
+      ${d.legado ? `<div style="color:var(--text2)">
+        Legado — VISITAS sem Tipo: <strong>${d.legado.visitas_sem_tipo || 0}</strong>
+      </div>` : ''}
       <div style="color:var(--text3);margin-top:4px">Atualizado em: ${new Date(d.ts).toLocaleString('pt-BR')}</div>
     `;
   } catch(e) {
@@ -1859,13 +1862,36 @@ async function auditCheckDuplicates() {
       </div>`;
     };
 
+    const hasFindings = Array.isArray(d.findings);
+    if (hasFindings) {
+      const byCategory = cat => d.findings.filter(f => f.categoria === cat);
+      const renderFindings = (label, items) => {
+        if (!items.length) return '';
+        return `<div style="margin-bottom:8px">
+          <div style="font-weight:500;margin-bottom:4px">${label} (${items.length})</div>
+          ${items.map(i => `<div style="color:var(--red);padding:2px 0">${i.key} — ${i.count}x <small style="color:var(--text2)">[${i.confidence}] ${i.evidence}</small></div>`).join('')}
+        </div>`;
+      };
+
+      el.innerHTML =
+        `<div style="color:var(--red);font-weight:500;margin-bottom:8px">
+          ⚠ ${d.total_duplicatas} tipo(s) de duplicidade encontrado(s)
+        </div>` +
+        renderFindings('Máquina por ID', byCategory('maquina.id')) +
+        renderFindings('Máquina por cliente + série', byCategory('maquina.cliente_serie')) +
+        renderFindings('Máquina por cliente + TAG', byCategory('maquina.cliente_tag')) +
+        renderFindings('Cliente por CNPJ', byCategory('cliente.cnpj')) +
+        renderFindings('Modelo por marca+modelo', byCategory('modelo.marca_modelo'));
+      return;
+    }
+
     el.innerHTML =
       `<div style="color:var(--red);font-weight:500;margin-bottom:8px">
         ⚠ ${d.total_duplicatas} tipo(s) de duplicidade encontrado(s)
       </div>` +
-      renderList('Por Machine_ID', d.duplicatas.por_machine_id) +
-      renderList('Por cliente + série', d.duplicatas.por_cliente_serie) +
-      renderList('Por cliente + TAG', d.duplicatas.por_cliente_tag);
+      renderList('Por Machine_ID', d.duplicatas?.por_machine_id || []) +
+      renderList('Por cliente + série', d.duplicatas?.por_cliente_serie || []) +
+      renderList('Por cliente + TAG', d.duplicatas?.por_cliente_tag || []);
   } catch(e) {
     el.innerHTML = '❌ Falha na consulta: ' + (e.message || 'erro desconhecido');
   }
