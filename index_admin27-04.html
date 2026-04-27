@@ -1881,7 +1881,8 @@ async function auditCheckDuplicates() {
         renderFindings('Máquina por cliente + série', byCategory('maquina.cliente_serie')) +
         renderFindings('Máquina por cliente + TAG', byCategory('maquina.cliente_tag')) +
         renderFindings('Cliente por CNPJ', byCategory('cliente.cnpj')) +
-        renderFindings('Modelo por marca+modelo', byCategory('modelo.marca_modelo'));
+        renderFindings('Modelo por marca+modelo', byCategory('modelo.marca_modelo')) +
+        `<div style="color:var(--text2);font-size:11px;margin-top:6px">Compat API: ${(d.api_compat || ['findings_v2']).join(', ')}</div>`;
       return;
     }
 

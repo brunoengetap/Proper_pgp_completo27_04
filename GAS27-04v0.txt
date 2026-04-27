@@ -897,6 +897,7 @@ function getDuplicates() {
   return {
     status: 'ok',
     ts: new Date().toISOString(),
+    api_compat: ['findings_v2', 'duplicatas_v1'],
     findings,
     resumo,
     duplicatas: {
