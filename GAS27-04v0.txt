@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// PROPER COMPRESSORES — Google Apps Script (Backend) — v1.4
+// PROPER COMPRESSORES — Google Apps Script (Backend) — v1.5
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // ESTRUTURA DE ABAS DA PLANILHA:
@@ -104,6 +104,35 @@ function auditDefaults(tipoRegistro) {
   };
 }
 
+function normalizeEntityName(v) {
+  return String(v || '').trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function requestCacheKey(scope, requestId) {
+  return 'REQ_DONE:' + scope + ':' + String(requestId || '').trim();
+}
+
+function getProcessedRequest(scope, requestId) {
+  const req = String(requestId || '').trim();
+  if (!req) return null;
+  const raw = PropertiesService.getScriptProperties().getProperty(requestCacheKey(scope, req));
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (_) { return { raw: raw }; }
+}
+
+function markRequestProcessed(scope, requestId, result) {
+  const req = String(requestId || '').trim();
+  if (!req) return;
+  const payload = {
+    ts: new Date().toISOString(),
+    result: result || {}
+  };
+  PropertiesService.getScriptProperties().setProperty(requestCacheKey(scope, req), JSON.stringify(payload));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ENTRY POINT — GET (ping e consultas)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -116,7 +145,7 @@ function doGet(e) {
     if (action !== 'ping') checkKey(params);
     switch (action) {
       case 'ping':
-        result = { status: 'ok', version: '1.4', spreadsheet: SS.getName(), ts: new Date().toISOString() };
+        result = { status: 'ok', version: '1.5', spreadsheet: SS.getName(), ts: new Date().toISOString() };
         break;
       case 'searchMachine':
         result = searchMachine(params.q || '');
@@ -297,9 +326,15 @@ function searchMachine(query) {
 function saveVisit(body) {
   ensureSheetHeaders('VISITAS', HEADERS.VISITAS);
   ensureSheetHeaders('PECAS_LOG', HEADERS.PECAS_LOG);
+  const requestId = String(body.request_id || '').trim();
+  const cachedReq = getProcessedRequest('saveVisit', requestId);
+  if (cachedReq && cachedReq.result) {
+    return { ...cachedReq.result, duplicate: true, request_id: requestId };
+  }
   const visitId = 'VIS-' + new Date().getTime();
   const now = new Date().toISOString();
   const visitDate = body.visitDate || new Date().toLocaleDateString('pt-BR');
+  const tipo = String(body.tipo || 'inspecao').trim().toLowerCase() || 'inspecao';
   const machineId = body.machine_id ||
     machineKey(body.client||'', body.brand||'', body.model||'', body.serial||'');
 
@@ -316,7 +351,7 @@ function saveVisit(body) {
     body.scenario || '',
     body.tech     || '',
     visitDate,
-    body.tipo || 'inspecao',
+    tipo,
     body.generalObs || '',
     'SIM', 'PRODUCAO', now, '', '', now
   ]);
@@ -339,14 +374,26 @@ function saveVisit(body) {
     ]);
   });
 
-  updateMachineParts({
-    machine_id: machineId,
-    serial: body.serial || '',
-    tag: body.tag || '',
-    parts: parts
-  });
+  // Regra canônica: inspeção não altera estado em MACHINE_PARTS.
+  if (tipo === 'preventiva') {
+    const partsTrocadas = {};
+    Object.entries(parts).forEach(([partId, ps]) => {
+      const acao = String(ps?.acao || '').trim().toLowerCase();
+      if (acao === 'trocada') partsTrocadas[partId] = ps;
+    });
+    if (Object.keys(partsTrocadas).length > 0) {
+      updateMachineParts({
+        machine_id: machineId,
+        serial: body.serial || '',
+        tag: body.tag || '',
+        parts: partsTrocadas
+      });
+    }
+  }
 
-  return { status: 'ok', visitId, machineId };
+  const result = { status: 'ok', visitId, machineId, request_id: requestId };
+  markRequestProcessed('saveVisit', requestId, result);
+  return result;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -489,6 +536,13 @@ function getMachinePartsById(machineId, serial, tag) {
   }
 }
 
+function normalizeVisitTipo(tipoRaw) {
+  const t = String(tipoRaw || '').trim().toLowerCase();
+  if (!t) return 'inspecao_legado';
+  if (t === 'inspecao' || t === 'preventiva' || t === 'inspecao_legado') return t;
+  return 'inspecao';
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // GET VISITS NORMALIZED
 // ═══════════════════════════════════════════════════════════════════════════
@@ -516,7 +570,7 @@ function getVisitsNormalized() {
       scenario:   obj['Cenário']      || '',
       tech:       obj['Técnico']      || '',
       visitDate:  obj['Data Visita']  || '',
-      tipo:       obj['Tipo']         || 'inspecao',
+      tipo:       normalizeVisitTipo(obj['Tipo']),
       generalObs: obj['Obs.Gerais']   || '',
       'Machine_ID':  obj['Machine_ID']  || '',
       'Série':       obj['Série']       || '',
@@ -536,6 +590,12 @@ function savePreventiva(body) {
   ensureSheetHeaders('VISITAS', HEADERS.VISITAS);
   ensureSheetHeaders('PECAS_LOG', HEADERS.PECAS_LOG);
   ensureSheetHeaders('MACHINE_PARTS', HEADERS.MACHINE_PARTS);
+
+  const requestId = String(body.request_id || '').trim();
+  const cachedReq = getProcessedRequest('savePreventiva', requestId);
+  if (cachedReq && cachedReq.result) {
+    return { ...cachedReq.result, duplicate: true, request_id: requestId };
+  }
 
   if (!body || !body.visitDate || body.hourTotal === undefined || body.hourTotal === null || !body.parts) {
     return { status: 'error', error: 'Campos obrigatórios: machine_id/tipo/visitDate/hourTotal/parts' };
@@ -562,7 +622,7 @@ function savePreventiva(body) {
 
   for (let i = 1; i < visitsData.length; i++) {
     if (String(visitsData[i][idxVisitId] || '').trim() === visitId) {
-      return { status: 'ok', visitId, duplicate: true };
+      return { status: 'ok', visitId, duplicate: true, request_id: requestId };
     }
   }
 
@@ -633,7 +693,9 @@ function savePreventiva(body) {
   });
 
   updateMachineHorímetro(machineId, body.serial || '', body.tag || '', parseInt(body.hourTotal) || 0, body.visitDate || now);
-  return { status: 'ok', visitId, machineId, pecasTrocadas, duplicate: false };
+  const result = { status: 'ok', visitId, machineId, pecasTrocadas, duplicate: false, request_id: requestId };
+  markRequestProcessed('savePreventiva', requestId, result);
+  return result;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -651,7 +713,7 @@ function getVisitsByMachine(machineId) {
     .map(v => ({
       visitId:    v['ID'] || '',
       machine_id: v['Machine_ID'] || '',
-      tipo:       v['Tipo'] || 'inspecao',
+      tipo:       normalizeVisitTipo(v['Tipo']),
       visitDate:  v['Data Visita'] || '',
       hourTotal:  parseInt(v['Hor.Visita']) || 0,
       tech:       v['Técnico'] || '',
@@ -749,6 +811,8 @@ function getSystemHealth() {
     const mid = String(r['Machine_ID'] || '').trim();
     return mid && !machineIds.has(mid);
   });
+  const visitas = getSheetData('VISITAS');
+  const legacyTipoVazio = visitas.filter(r => !String(r['Tipo'] || '').trim()).length;
 
   return {
     status: 'ok',
@@ -757,6 +821,9 @@ function getSystemHealth() {
     orfaos: {
       machine_parts: orphanParts.length,
       visitas: orphanVisits.length
+    },
+    legado: {
+      visitas_sem_tipo: legacyTipoVazio
     }
   };
 }
@@ -766,35 +833,68 @@ function getSystemHealth() {
 // ═══════════════════════════════════════════════════════════════════════════
 function getDuplicates() {
   const machines = getSheetData('MAQUINAS');
-  const dupsByMachineId    = {};
-  const dupsByClientSerial = {};
-  const dupsByClientTag    = {};
+  const clients = getSheetData('CLIENTES');
+  const models = getSheetData('MODELOS');
 
-  machines.forEach(m => {
-    const mid = String(m['ID'] || '').trim();
-    const clientSerial = (String(m['Cliente'] || '').trim() + '|' + String(m['Série'] || '').trim()).toLowerCase();
-    const clientTag    = (String(m['Cliente'] || '').trim() + '|' + String(m['TAG']    || '').trim()).toLowerCase();
-    if (mid) dupsByMachineId[mid] = (dupsByMachineId[mid] || 0) + 1;
-    if (clientSerial && clientSerial !== '|') dupsByClientSerial[clientSerial] = (dupsByClientSerial[clientSerial] || 0) + 1;
-    if (clientTag    && clientTag    !== '|') dupsByClientTag[clientTag]        = (dupsByClientTag[clientTag]    || 0) + 1;
+  const norm = v => normalizeEntityName(v).replace(/\s+/g, '');
+  const bucketBy = (rows, keyFn) => {
+    const b = {};
+    rows.forEach(r => {
+      const key = keyFn(r);
+      if (!key) return;
+      if (!b[key]) b[key] = [];
+      b[key].push(r);
+    });
+    return b;
+  };
+  const toFindings = (bucket, kind, confidence, evidence) =>
+    Object.entries(bucket)
+      .filter(([, arr]) => arr.length > 1)
+      .map(([key, arr]) => ({
+        categoria: kind,
+        confidence,
+        evidence,
+        key,
+        count: arr.length
+      }));
+
+  const machinesById = bucketBy(machines, m => String(m['ID'] || '').trim());
+  const machinesByClientSerial = bucketBy(machines, m => {
+    const client = norm(m['Cliente']);
+    const serial = norm(m['Série']);
+    return client && serial ? (client + '|' + serial) : '';
+  });
+  const machinesByClientTag = bucketBy(machines, m => {
+    const client = norm(m['Cliente']);
+    const tag = norm(m['TAG']);
+    return client && tag ? (client + '|' + tag) : '';
+  });
+  const clientsByCnpj = bucketBy(clients, c => String(c['CNPJ'] || '').replace(/\D/g, ''));
+  const modelsByBrandModel = bucketBy(models, m => {
+    const brand = norm(m['Marca']);
+    const model = norm(m['Modelo']);
+    return brand && model ? (brand + '|' + model) : '';
   });
 
-  const filterDups = obj =>
-    Object.entries(obj).filter(([, c]) => c > 1).map(([key, count]) => ({ key, count }));
+  const findings = [
+    ...toFindings(machinesById, 'maquina.id', 'alto', 'ID idêntico'),
+    ...toFindings(machinesByClientSerial, 'maquina.cliente_serie', 'alto', 'Cliente + Série idênticos'),
+    ...toFindings(machinesByClientTag, 'maquina.cliente_tag', 'alto', 'Cliente + TAG idênticos'),
+    ...toFindings(clientsByCnpj, 'cliente.cnpj', 'alto', 'CNPJ idêntico'),
+    ...toFindings(modelsByBrandModel, 'modelo.marca_modelo', 'medio', 'Marca + Modelo normalizados iguais')
+  ];
 
-  const porMachineId     = filterDups(dupsByMachineId);
-  const porClienteSerial = filterDups(dupsByClientSerial);
-  const porClienteTag    = filterDups(dupsByClientTag);
+  const resumo = findings.reduce((acc, f) => {
+    acc[f.categoria] = (acc[f.categoria] || 0) + 1;
+    return acc;
+  }, {});
 
   return {
     status: 'ok',
     ts: new Date().toISOString(),
-    duplicatas: {
-      por_machine_id:    porMachineId,
-      por_cliente_serie: porClienteSerial,
-      por_cliente_tag:   porClienteTag
-    },
-    total_duplicatas: porMachineId.length + porClienteSerial.length + porClienteTag.length
+    findings,
+    resumo,
+    total_duplicatas: findings.length
   };
 }
 
@@ -1141,9 +1241,22 @@ function saveClient(c) {
   const data = sheet.getDataRange().getValues();
   const headers = data[0];
   const idxId = headers.indexOf('ID');
+  const idxCnpj = headers.indexOf('CNPJ');
 
+  const cnpj = String(c.cnpj || '').trim();
+  if (cnpj) {
+    for (let i = 1; i < data.length; i++) {
+      const rowId = String(data[i][idxId] || '').trim();
+      const rowCnpj = String(data[i][idxCnpj] || '').trim();
+      if (rowCnpj && rowCnpj === cnpj && rowId !== String(c.id || '').trim()) {
+        return { status: 'error', error: 'CNPJ já cadastrado para outro cliente', duplicate: true };
+      }
+    }
+  }
+
+  const newClientId = c.id || 'CLI-' + new Date().getTime();
   const buildRow = (ativo, tipo, created) => [
-    c.id || 'CLI-' + new Date().getTime(),
+    newClientId,
     c.nome      || '',
     c.cnpj      || '',
     c.cidade    || '',
@@ -1172,7 +1285,12 @@ function saveClient(c) {
   }
 
   sheet.appendRow(buildRow(ad.ativo, ad.tipoRegistro, ad.createdAt));
-  return { status: 'ok', action: 'inserted' };
+  const nomeNorm = normalizeEntityName(c.nome || c.nome_fantasia || '');
+  const sugestoes = getSheetDataActive('CLIENTES')
+    .filter(r => normalizeEntityName(r['Nome']) === nomeNorm && String(r['ID'] || '').trim() !== String(newClientId).trim())
+    .slice(0, 3)
+    .map(r => ({ id: r['ID'] || '', nome: r['Nome'] || '', cnpj: r['CNPJ'] || '' }));
+  return { status: 'ok', action: 'inserted', alerts: { nome_semelhante: sugestoes } };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
